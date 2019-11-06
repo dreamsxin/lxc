@@ -330,17 +330,30 @@ again:
 	return status;
 }
 
-#if HAVE_LIBGNUTLS
-#include <gnutls/gnutls.h>
-#include <gnutls/crypto.h>
+#ifdef HAVE_OPENSSL
+#include <openssl/evp.h>
 
-__attribute__((constructor))
-static void gnutls_lxc_init(void)
+static int do_sha1_hash(const char *buf, int buflen, unsigned char *md_value, unsigned int *md_len)
 {
-	gnutls_global_init();
+	EVP_MD_CTX *mdctx;
+	const EVP_MD *md;
+
+	md = EVP_get_digestbyname("sha1");
+	if(!md) {
+		printf("Unknown message digest: sha1\n");
+		return -1;
+	}
+
+	mdctx = EVP_MD_CTX_create();
+	EVP_DigestInit_ex(mdctx, md, NULL);
+	EVP_DigestUpdate(mdctx, buf, buflen);
+	EVP_DigestFinal_ex(mdctx, md_value, md_len);
+	EVP_MD_CTX_destroy(mdctx);
+
+	return 0;
 }
 
-int sha1sum_file(char *fnam, unsigned char *digest)
+int sha1sum_file(char *fnam, unsigned char *digest, unsigned int *md_len)
 {
 	char *buf;
 	int ret;
@@ -394,7 +407,7 @@ int sha1sum_file(char *fnam, unsigned char *digest)
 	}
 
 	buf[flen] = '\0';
-	ret = gnutls_hash_fast(GNUTLS_DIG_SHA1, buf, flen, (void *)digest);
+	ret = do_sha1_hash(buf, flen, (void *)digest, md_len);
 	free(buf);
 	return ret;
 }
@@ -693,15 +706,18 @@ int detect_shared_rootfs(void)
 
 bool switch_to_ns(pid_t pid, const char *ns)
 {
-	int fd, ret;
-	char nspath[PATH_MAX];
+	__do_close_prot_errno int fd = -EBADF;
+	int ret;
+	char nspath[STRLITERALLEN("/proc//ns/")
+		    + INTTYPE_TO_STRLEN(pid_t)
+		    + LXC_NAMESPACE_NAME_MAX];
 
 	/* Switch to new ns */
-	ret = snprintf(nspath, PATH_MAX, "/proc/%d/ns/%s", pid, ns);
-	if (ret < 0 || ret >= PATH_MAX)
+	ret = snprintf(nspath, sizeof(nspath), "/proc/%d/ns/%s", pid, ns);
+	if (ret < 0 || ret >= sizeof(nspath))
 		return false;
 
-	fd = open(nspath, O_RDONLY);
+	fd = open(nspath, O_RDONLY | O_CLOEXEC);
 	if (fd < 0) {
 		SYSERROR("Failed to open \"%s\"", nspath);
 		return false;
@@ -709,12 +725,11 @@ bool switch_to_ns(pid_t pid, const char *ns)
 
 	ret = setns(fd, 0);
 	if (ret) {
-		SYSERROR("Failed to set process %d to \"%s\" of %d.", pid, ns, fd);
-		close(fd);
+		SYSERROR("Failed to set process %d to \"%s\" of %d.", pid, ns,
+			 fd);
 		return false;
 	}
 
-	close(fd);
 	return true;
 }
 
@@ -1156,8 +1171,8 @@ int safe_mount(const char *src, const char *dest, const char *fstype,
 		if (srcfd < 0)
 			return srcfd;
 
-		ret = snprintf(srcbuf, 50, "/proc/self/fd/%d", srcfd);
-		if (ret < 0 || ret > 50) {
+		ret = snprintf(srcbuf, sizeof(srcbuf), "/proc/self/fd/%d", srcfd);
+		if (ret < 0 || ret >= (int)sizeof(srcbuf)) {
 			close(srcfd);
 			ERROR("Out of memory");
 			return -EINVAL;
@@ -1176,8 +1191,8 @@ int safe_mount(const char *src, const char *dest, const char *fstype,
 		return destfd;
 	}
 
-	ret = snprintf(destbuf, 50, "/proc/self/fd/%d", destfd);
-	if (ret < 0 || ret > 50) {
+	ret = snprintf(destbuf, sizeof(destbuf), "/proc/self/fd/%d", destfd);
+	if (ret < 0 || ret >= (int)sizeof(destbuf)) {
 		if (srcfd != -1)
 			close(srcfd);
 
@@ -1542,6 +1557,8 @@ int lxc_prepare_loop_dev(const char *source, char *loop_dev, int flags)
 	memset(&lo64, 0, sizeof(lo64));
 	lo64.lo_flags = flags;
 
+	strlcpy((char *)lo64.lo_file_name, source, LO_NAME_SIZE);
+
 	ret = ioctl(fd_loop, LOOP_SET_STATUS64, &lo64);
 	if (ret < 0) {
 		SYSERROR("Failed to set loop status64");
@@ -1609,7 +1626,7 @@ int run_command_internal(char *buf, size_t buf_size, int (*child_fn)(void *), vo
 		return -1;
 	}
 
-	child = lxc_raw_clone(0);
+	child = lxc_raw_clone(0, NULL);
 	if (child < 0) {
 		close(pipefd[0]);
 		close(pipefd[1]);
@@ -1711,7 +1728,43 @@ uint64_t lxc_find_next_power2(uint64_t n)
 	return n;
 }
 
-int lxc_set_death_signal(int signal, pid_t parent)
+static int process_dead(/* takes */ int status_fd)
+{
+	__do_close_prot_errno int dupfd = -EBADF;
+	__do_free char *line = NULL;
+	__do_fclose FILE *f = NULL;
+	int ret = 0;
+	size_t n = 0;
+
+	dupfd = dup(status_fd);
+	if (dupfd < 0)
+		return -1;
+
+	if (fd_cloexec(dupfd, true) < 0)
+		return -1;
+
+	/* transfer ownership of fd */
+	f = fdopen(move_fd(dupfd), "re");
+	if (!f)
+		return -1;
+
+	ret = 0;
+	while (getline(&line, &n, f) != -1) {
+		char *state;
+
+		if (strncmp(line, "State:", 6))
+			continue;
+
+		state = lxc_trim_whitespace_in_place(line + 6);
+		/* only check whether process is dead or zombie for now */
+		if (*state == 'X' || *state == 'Z')
+			ret = 1;
+	}
+
+	return ret;
+}
+
+int lxc_set_death_signal(int signal, pid_t parent, int parent_status_fd)
 {
 	int ret;
 	pid_t ppid;
@@ -1719,12 +1772,16 @@ int lxc_set_death_signal(int signal, pid_t parent)
 	ret = prctl(PR_SET_PDEATHSIG, prctl_arg(signal), prctl_arg(0),
 		    prctl_arg(0), prctl_arg(0));
 
-	/* If not in a PID namespace, check whether we have been orphaned. */
+	/* verify that we haven't been orphaned in the meantime */
 	ppid = (pid_t)syscall(SYS_getppid);
-	if (ppid && ppid != parent) {
-		ret = raise(SIGKILL);
-		if (ret < 0)
-			return -1;
+	if (ppid == 0) { /* parent outside our pidns */
+		if (parent_status_fd < 0)
+			return 0;
+
+		if (process_dead(parent_status_fd) == 1)
+			return raise(SIGKILL);
+	} else if (ppid != parent) {
+		return raise(SIGKILL);
 	}
 
 	if (ret < 0)

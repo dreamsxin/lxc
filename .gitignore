@@ -101,6 +101,9 @@ src/tests/lxc-test-criu-check-feature
 src/tests/lxc-test-raw-clone
 src/tests/lxc-test-share-ns
 src/tests/lxc-test-state-server
+src/tests/lxc-test-basic
+src/tests/lxc-test-cve-2019-5736
+src/tests/lxc-test-mount-injection
 
 config/compile
 config/config.guess
@@ -127,9 +130,11 @@ config/sysconfig/lxc
 doc/*.1
 doc/*.5
 doc/*.7
+doc/*.8
 doc/ja/*.1
 doc/ja/*.5
 doc/ja/*.7
+doc/ja/*.8
 doc/ko/*.1
 doc/ko/*.5
 doc/ko/*.7

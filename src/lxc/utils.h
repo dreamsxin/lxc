@@ -26,6 +26,10 @@
 /* Properly support loop devices on 32bit systems. */
 #define _FILE_OFFSET_BITS 64
 
+#ifndef MAX_GRBUF_SIZE
+#define MAX_GRBUF_SIZE 65536
+#endif
+
 #include <errno.h>
 #include <linux/loop.h>
 #include <linux/types.h>
@@ -94,9 +98,8 @@ extern int lxc_pclose(struct lxc_popen_FILE *fp);
 extern int wait_for_pid(pid_t pid);
 extern int lxc_wait_for_pid_status(pid_t pid);
 
-#if HAVE_LIBGNUTLS
-#define SHA_DIGEST_LENGTH 20
-extern int sha1sum_file(char *fnam, unsigned char *md_value);
+#if HAVE_OPENSSL
+extern int sha1sum_file(char *fnam, unsigned char *md_value, unsigned int *md_len);
 #endif
 
 /* initialize rand with urandom */
@@ -253,7 +256,7 @@ static inline uint64_t lxc_getpagesize(void)
 extern uint64_t lxc_find_next_power2(uint64_t n);
 
 /* Set a signal the child process will receive after the parent has died. */
-extern int lxc_set_death_signal(int signal, pid_t parent);
+extern int lxc_set_death_signal(int signal, pid_t parent, int parent_status_fd);
 extern int fd_cloexec(int fd, bool cloexec);
 extern int recursive_destroy(char *dirname);
 extern int lxc_setup_keyring(void);

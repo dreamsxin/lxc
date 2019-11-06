@@ -102,8 +102,19 @@ struct lxc_handler {
 	/* The child's pid. */
 	pid_t pid;
 
+	/* The child's pidfd. */
+	int pidfd;
+
+	/*
+	 * File descriptor for the /proc/<pid> directory of the container's
+	 * init process.
+	 */
+	int proc_pidfd;
+
 	/* The monitor's pid. */
 	pid_t monitor_pid;
+
+	int monitor_status_fd;
 
 	/* Whether the child has already exited. */
 	bool init_died;
